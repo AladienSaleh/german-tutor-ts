@@ -11,7 +11,7 @@ import { createSTTProvider } from './providers/stt/index.js';
 import { createMainLLM, createCorrectorLLM } from './providers/llm/index.js';
 import { createTTSProvider } from './providers/tts/index.js';
 
-const app = Fastify({ logger: { level: 'warn' } });
+const app = Fastify({ logger: { level: 'warn' }, bodyLimit: 20 * 1024 * 1024 }); // 20 MB for image payloads
 
 await app.register(fastifyCors, { origin: true });
 await app.register(fastifyWs);
