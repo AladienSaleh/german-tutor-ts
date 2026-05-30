@@ -108,7 +108,64 @@ async function* streamWithOpenAI(messages: StudyMessage[]): AsyncGenerator<strin
   }
 }
 
+async function* streamWithOllama(messages: StudyMessage[]): AsyncGenerator<string> {
+  const ollamaMsgs = [
+    { role: 'system', content: STUDY_SYSTEM_PROMPT },
+    ...messages.map(m => {
+      if (m.role === 'user' && m.imageBase64) {
+        return {
+          role: 'user' as const,
+          content: m.content || 'ما الذي تظهره هذه الصورة؟ اشرح المحتوى بالتفصيل.',
+          images: [m.imageBase64],
+        };
+      }
+      return { role: m.role as 'user' | 'assistant', content: m.content };
+    }),
+  ];
+
+  const res = await fetch(config.llm.ollamaUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: config.llm.model,
+      messages: ollamaMsgs,
+      stream: true,
+      think: false,
+      options: { num_predict: 1024, temperature: 0.7, keep_alive: -1 },
+    }),
+  });
+
+  if (!res.ok || !res.body) throw new Error(`Ollama HTTP ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const parts = buf.split('\n');
+    buf = parts.pop() ?? '';
+    for (const line of parts) {
+      if (!line.trim()) continue;
+      try {
+        const chunk = JSON.parse(line) as { message?: { content?: string }; done?: boolean };
+        if (chunk.message?.content) yield chunk.message.content;
+        if (chunk.done) return;
+      } catch { /* skip malformed */ }
+    }
+  }
+}
+
 async function* streamWithFallback(messages: StudyMessage[]): AsyncGenerator<string> {
+  // Ollama supports vision natively via the images field
+  if (config.llm.provider === 'ollama') {
+    yield* streamWithOllama(messages);
+    return;
+  }
+
+  // Other text-only LLMs: strip the image and note it
   const { createMainLLM } = await import('./providers/llm/index.js');
   const llm = createMainLLM();
   const llmMsgs = [
@@ -116,7 +173,7 @@ async function* streamWithFallback(messages: StudyMessage[]): AsyncGenerator<str
     ...messages.map(m => ({
       role: m.role as 'user' | 'assistant',
       content: m.imageBase64
-        ? `[Image was attached but vision is not supported with this LLM provider]\n${m.content}`
+        ? `[Image attached — vision not supported by this provider]\n${m.content}`
         : m.content,
     })),
   ];
