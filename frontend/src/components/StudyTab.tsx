@@ -30,6 +30,7 @@ interface StudyChatMsg {
   imageBase64?: string;
   imageMime?: string;
   audioFileName?: string;
+  audioPreviewUrl?: string; // kept alive for in-chat playback
   streaming?: boolean;
 }
 
@@ -229,10 +230,10 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
   translationLangRef.current = translationLang;
   messagesRef.current = messages;
 
-  // Revoke audio object URLs when cleared
+  // Revoke all message-level audio URLs on unmount
   useEffect(() => () => {
-    if (attachedAudio) URL.revokeObjectURL(attachedAudio.previewUrl);
-  }, [attachedAudio]);
+    messagesRef.current.forEach(m => { if (m.audioPreviewUrl) URL.revokeObjectURL(m.audioPreviewUrl); });
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -328,6 +329,8 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
       uploadedAudioBase64 = attachedAudio?.base64,
       uploadedAudioName = attachedAudio?.name,
     } = opts;
+    // Capture preview URL before clearing attachment; URL is now owned by the message
+    const uploadedAudioPreviewUrl = attachedAudio?.previewUrl;
     const trimmed = (userText ?? '').trim();
     const hasInput = trimmed || audioBase64 || imageBase64 || uploadedAudioBase64;
     if (!hasInput || isGenerating) return;
@@ -351,8 +354,7 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
 
     setInputText('');
     setAttachedImage(null);
-    if (attachedAudio) URL.revokeObjectURL(attachedAudio.previewUrl);
-    setAttachedAudio(null);
+    setAttachedAudio(null); // URL is now owned by the message — do NOT revoke here
     setIsGenerating(true);
 
     try {
@@ -398,6 +400,7 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
               role: 'user', content: event.text!,
               imageBase64, imageMime,
               audioFileName: uploadedAudioName,
+              audioPreviewUrl: uploadedAudioPreviewUrl,
             };
             setMessages(prev => [...prev.slice(0, -1), userMsg, { role: 'assistant', content: '', streaming: true }]);
           } else if (event.type === 'token') {
@@ -454,7 +457,10 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
       {/* Top bar */}
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', px: 1.5, py: 0.75, borderBottom: '1px solid', borderColor: 'divider' }}>
         <Tooltip title="Clear conversation">
-          <IconButton size="small" onClick={() => setMessages([WELCOME])} disabled={isGenerating}>
+          <IconButton size="small" onClick={() => {
+            messagesRef.current.forEach(m => { if (m.audioPreviewUrl) URL.revokeObjectURL(m.audioPreviewUrl); });
+            setMessages([WELCOME]);
+          }} disabled={isGenerating}>
             <ClearIcon fontSize="small" />
           </IconButton>
         </Tooltip>
@@ -475,9 +481,18 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
           return (
             <Box key={i} sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 0.5 }}>
               {m.audioFileName && (
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, px: 1.25, py: 0.5, bgcolor: 'rgba(33,150,243,0.08)', borderRadius: 2, mb: 0.5 }}>
-                  <WaveIcon sx={{ fontSize: 16, color: 'primary.main' }} />
-                  <Typography variant="caption" sx={{ color: 'primary.dark', fontWeight: 500 }}>{m.audioFileName}</Typography>
+                <Box sx={{ mb: 0.75, width: '100%', maxWidth: 320 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, px: 1.25, py: 0.5, bgcolor: 'rgba(33,150,243,0.1)', borderRadius: '8px 8px 0 0', borderBottom: '1px solid rgba(33,150,243,0.2)' }}>
+                    <WaveIcon sx={{ fontSize: 15, color: 'primary.main' }} />
+                    <Typography variant="caption" noWrap sx={{ color: 'primary.dark', fontWeight: 600, flexGrow: 1 }}>
+                      {m.audioFileName}
+                    </Typography>
+                  </Box>
+                  {m.audioPreviewUrl && (
+                    // eslint-disable-next-line jsx-a11y/media-has-caption
+                    <audio controls src={m.audioPreviewUrl}
+                      style={{ width: '100%', height: 36, display: 'block', borderRadius: '0 0 8px 8px' }} />
+                  )}
                 </Box>
               )}
               {m.imageBase64 && (
