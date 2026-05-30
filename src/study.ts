@@ -180,6 +180,59 @@ async function* streamWithFallback(messages: StudyMessage[]): AsyncGenerator<str
   yield* llm.stream(llmMsgs);
 }
 
+// ── Thread title generation ───────────────────────────────────────────────────
+
+export async function generateTitle(messages: StudyMessage[]): Promise<string> {
+  const sample = messages
+    .filter(m => m.role !== 'system' && m.content.trim())
+    .slice(0, 4)
+    .map(m => `${m.role}: ${m.content.replace(/[#*`]/g, '').slice(0, 200)}`)
+    .join('\n');
+
+  const prompt =
+    `Generate a very short title (4–6 words MAX) for this study conversation.\n` +
+    `Reply with ONLY the title — no quotes, no punctuation at the end.\n` +
+    `If the conversation is mainly in Arabic, write the title in Arabic.\n` +
+    `If mainly in German, write in German. Otherwise English.\n\n` +
+    `Conversation:\n${sample}`;
+
+  if (config.apiKeys.anthropic) {
+    const Anthropic = (await import('@anthropic-ai/sdk')).default;
+    const client = new Anthropic({ apiKey: config.apiKeys.anthropic });
+    const res = await client.messages.create({
+      model: config.llm.anthropicModel,
+      max_tokens: 30,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    return (res.content[0] as { text: string }).text.trim();
+  }
+
+  if (config.apiKeys.openai) {
+    const { default: OpenAI } = await import('openai');
+    const client = new OpenAI({ apiKey: config.apiKeys.openai, baseURL: config.llm.openaiBaseUrl });
+    const res = await client.chat.completions.create({
+      model: config.llm.openaiModel,
+      max_tokens: 30,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    return res.choices[0]?.message?.content?.trim() ?? 'Study session';
+  }
+
+  const res = await fetch(config.llm.ollamaUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: config.llm.model,
+      messages: [{ role: 'user', content: prompt }],
+      stream: false,
+      think: false,
+      options: { num_predict: 30, temperature: 0.5, keep_alive: -1 },
+    }),
+  });
+  const data = await res.json() as { message: { content: string } };
+  return data.message.content.trim();
+}
+
 // ── Quick translation (non-streaming) ────────────────────────────────────────
 
 const LANG_NAMES: Record<string, string> = {
