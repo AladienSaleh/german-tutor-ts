@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { ThemeProvider, CssBaseline, Box, Paper, Tab, Tabs } from '@mui/material';
-import { Mic as MicIcon, MenuBook as MenuBookIcon } from '@mui/icons-material';
+import {
+  ThemeProvider, CssBaseline, Box, Paper, Tab, Tabs,
+  Button, Typography,
+} from '@mui/material';
+import {
+  Mic as MicIcon, MenuBook as MenuBookIcon,
+  PlayArrow as PlayArrowIcon, Translate as TranslateIcon,
+} from '@mui/icons-material';
 import theme from './theme.ts';
 import { useWebSocket } from './hooks/useWebSocket.ts';
 import { useAudioRecorder } from './hooks/useAudioRecorder.ts';
@@ -19,6 +25,8 @@ const WS_BASE  = window.location.hostname === 'localhost'
   ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://localhost:3000`
   : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
 
+const LS_TRANSLATION_LANG = 'study_translation_lang';
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'practice' | 'study'>('practice');
   const [messages, setMessages] = useState<Message[]>([]);
@@ -29,7 +37,15 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [latency, setLatency] = useState<{ sttMs: number; ttsMs: number } | null>(null);
   const [isTyping, setIsTyping] = useState(false);
+  const [translationLang, setTranslationLang] = useState<string>(
+    () => localStorage.getItem(LS_TRANSLATION_LANG) ?? 'ar',
+  );
   const activeSessionRef = useRef(false);
+
+  const handleTranslationLangChange = useCallback((lang: string) => {
+    setTranslationLang(lang);
+    localStorage.setItem(LS_TRANSLATION_LANG, lang);
+  }, []);
 
   // ── Audio player ─────────────────────────────────────────────────────────────
   const { isPlaying, enqueue, interrupt } = useAudioPlayer();
@@ -90,16 +106,11 @@ export default function App() {
     },
   });
 
-  // ── Load scenarios ────────────────────────────────────────────────────────────
+  // ── Load scenarios (no auto-open) ─────────────────────────────────────────────
   useEffect(() => {
     fetch(`${API_BASE}/api/scenarios`)
       .then(r => r.json())
-      .then((data: { scenarios: ScenarioInfo[] }) => {
-        setScenarios(data.scenarios);
-        if (data.scenarios.length > 0) {
-          setShowScenarioModal(true);
-        }
-      })
+      .then((data: { scenarios: ScenarioInfo[] }) => setScenarios(data.scenarios))
       .catch(() => {});
   }, []);
 
@@ -136,7 +147,6 @@ export default function App() {
     reader.readAsDataURL(blob);
   }, [send, interrupt]);
 
-  // Only enable recorder on the practice tab
   const recorderEnabled = activeTab === 'practice' && wsStatus === 'connected' && appState !== 'processing';
 
   const { isRecording, audioLevel, startRecording, stopRecording } = useAudioRecorder(
@@ -149,6 +159,7 @@ export default function App() {
   }, [isRecording, interrupt]);
 
   const selectedScenarioInfo = scenarios.find(s => s.id === selectedScenario);
+  const practiceConnected = wsStatus === 'connected';
 
   return (
     <ThemeProvider theme={theme}>
@@ -157,7 +168,7 @@ export default function App() {
         <StatusBar
           wsStatus={wsStatus}
           appState={appState}
-          scenarioTitle={activeTab === 'practice' ? (selectedScenarioInfo?.title ?? '') : ''}
+          scenarioTitle={activeTab === 'practice' && practiceConnected ? (selectedScenarioInfo?.title ?? '') : ''}
           onReconnect={handleReconnect}
           onSettings={() => setShowSettings(true)}
         />
@@ -196,26 +207,55 @@ export default function App() {
 
           {/* ── Practice tab ── */}
           {activeTab === 'practice' && (
-            <>
-              <ChatArea messages={messages} isTyping={isTyping} />
+            practiceConnected ? (
+              <>
+                <ChatArea messages={messages} isTyping={isTyping} />
+                <Box sx={{
+                  borderTop: '1px solid', borderColor: 'divider',
+                  display: 'flex', justifyContent: 'center',
+                  py: 2, px: 2,
+                }}>
+                  <RecordButton
+                    appState={appState}
+                    audioLevel={audioLevel}
+                    onPress={() => { unlockAudio(); startRecording(); }}
+                    onRelease={stopRecording}
+                    disabled={appState === 'processing'}
+                  />
+                </Box>
+              </>
+            ) : (
+              /* Welcome / start screen */
               <Box sx={{
-                borderTop: '1px solid', borderColor: 'divider',
-                display: 'flex', justifyContent: 'center',
-                py: 2, px: 2,
+                flexGrow: 1, display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center', gap: 2.5, p: 4,
               }}>
-                <RecordButton
-                  appState={appState}
-                  audioLevel={audioLevel}
-                  onPress={() => { unlockAudio(); startRecording(); }}
-                  onRelease={stopRecording}
-                  disabled={wsStatus !== 'connected' || appState === 'processing'}
-                />
+                <TranslateIcon sx={{ fontSize: 72, color: 'primary.light', opacity: 0.6 }} />
+                <Box sx={{ textAlign: 'center' }}>
+                  <Typography variant="h6" fontWeight={700} gutterBottom>
+                    Ready to practice German?
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Choose a scenario and start speaking with Lina
+                  </Typography>
+                </Box>
+                <Button
+                  variant="contained"
+                  size="large"
+                  startIcon={<PlayArrowIcon />}
+                  onClick={() => { unlockAudio(); setShowScenarioModal(true); }}
+                  sx={{ borderRadius: 3, px: 4 }}
+                >
+                  Start Practice
+                </Button>
               </Box>
-            </>
+            )
           )}
 
           {/* ── Study tab ── */}
-          {activeTab === 'study' && <StudyTab />}
+          {activeTab === 'study' && (
+            <StudyTab translationLang={translationLang} />
+          )}
         </Paper>
 
         <ScenarioModal
@@ -230,6 +270,8 @@ export default function App() {
           onClose={() => setShowSettings(false)}
           latency={latency}
           onChangeScenario={() => setShowScenarioModal(true)}
+          translationLang={translationLang}
+          onTranslationLangChange={handleTranslationLangChange}
         />
       </Box>
     </ThemeProvider>

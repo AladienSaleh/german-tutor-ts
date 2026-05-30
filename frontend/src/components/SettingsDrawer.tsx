@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   Drawer, Box, Typography, Divider, IconButton,
   List, ListItem, ListItemText, Chip, CircularProgress,
+  ToggleButtonGroup, ToggleButton,
 } from '@mui/material';
 import { Close as CloseIcon, Settings as SettingsIcon } from '@mui/icons-material';
 
@@ -21,9 +22,13 @@ interface SettingsDrawerProps {
   onClose: () => void;
   latency: LatencyStats | null;
   onChangeScenario: () => void;
+  translationLang: string;
+  onTranslationLangChange: (lang: string) => void;
 }
 
-export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({ open, onClose, latency, onChangeScenario }) => {
+export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
+  open, onClose, latency, onChangeScenario, translationLang, onTranslationLangChange,
+}) => {
   const [cfg, setCfg] = useState<ServerConfig | null>(null);
 
   useEffect(() => {
@@ -101,6 +106,25 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({ open, onClose, l
             <ListItemText primary="Change Scenario" secondary="Starts a new session" />
           </ListItem>
         </List>
+      </Box>
+
+      <Divider />
+      <Box sx={{ p: 2 }}>
+        <Typography variant="overline" color="text.secondary">Study — Quick Translation</Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+          Select text in Study tab to translate it
+        </Typography>
+        <ToggleButtonGroup
+          value={translationLang}
+          exclusive
+          onChange={(_, v) => { if (v) onTranslationLangChange(v); }}
+          size="small"
+          fullWidth
+        >
+          <ToggleButton value="ar" sx={{ fontSize: '0.75rem' }}>عربي</ToggleButton>
+          <ToggleButton value="de" sx={{ fontSize: '0.75rem' }}>Deutsch</ToggleButton>
+          <ToggleButton value="en" sx={{ fontSize: '0.75rem' }}>English</ToggleButton>
+        </ToggleButtonGroup>
       </Box>
 
       <Box sx={{ flexGrow: 1 }} />

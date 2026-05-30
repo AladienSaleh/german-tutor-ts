@@ -6,7 +6,7 @@ import { existsSync } from 'fs';
 import { config } from './config.js';
 import { listScenarios, loadScenario } from './scenarios.js';
 import { handleSession } from './session.js';
-import { streamStudyChat, type StudyMessage } from './study.js';
+import { streamStudyChat, quickTranslate, type StudyMessage } from './study.js';
 import { createSTTProvider } from './providers/stt/index.js';
 import { createMainLLM, createCorrectorLLM } from './providers/llm/index.js';
 import { createTTSProvider } from './providers/tts/index.js';
@@ -90,6 +90,12 @@ app.post('/api/study/chat', async (req, reply) => {
     sse('[DONE]');
     res.end();
   }
+});
+
+app.post('/api/study/translate', async (req) => {
+  const { text, targetLang } = req.body as { text: string; targetLang?: string };
+  const translation = await quickTranslate(text.slice(0, 500), targetLang ?? 'ar');
+  return { translation };
 });
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────

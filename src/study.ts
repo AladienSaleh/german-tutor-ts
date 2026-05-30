@@ -180,6 +180,58 @@ async function* streamWithFallback(messages: StudyMessage[]): AsyncGenerator<str
   yield* llm.stream(llmMsgs);
 }
 
+// ── Quick translation (non-streaming) ────────────────────────────────────────
+
+const LANG_NAMES: Record<string, string> = {
+  ar: 'Arabic (العربية)',
+  de: 'German (Deutsch)',
+  en: 'English',
+};
+
+export async function quickTranslate(text: string, targetLang: string): Promise<string> {
+  const lang = LANG_NAMES[targetLang] ?? targetLang;
+  const prompt = `Translate only the following text to ${lang}. Reply with ONLY the translation, no explanations:\n\n${text}`;
+
+  if (config.apiKeys.anthropic) {
+    const Anthropic = (await import('@anthropic-ai/sdk')).default;
+    const client = new Anthropic({ apiKey: config.apiKeys.anthropic });
+    const res = await client.messages.create({
+      model: config.llm.anthropicModel,
+      max_tokens: 200,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    return (res.content[0] as { text: string }).text.trim();
+  }
+
+  if (config.apiKeys.openai) {
+    const { default: OpenAI } = await import('openai');
+    const client = new OpenAI({ apiKey: config.apiKeys.openai, baseURL: config.llm.openaiBaseUrl });
+    const res = await client.chat.completions.create({
+      model: config.llm.openaiModel,
+      max_tokens: 200,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    return res.choices[0]?.message?.content?.trim() ?? '';
+  }
+
+  // Ollama fallback
+  const res = await fetch(config.llm.ollamaUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: config.llm.model,
+      messages: [{ role: 'user', content: prompt }],
+      stream: false,
+      think: false,
+      options: { num_predict: 200, temperature: 0.3, keep_alive: -1 },
+    }),
+  });
+  const data = await res.json() as { message: { content: string } };
+  return data.message.content.trim();
+}
+
+// ── Streaming study chat ──────────────────────────────────────────────────────
+
 export async function* streamStudyChat(
   history: StudyMessage[],
   userText: string,

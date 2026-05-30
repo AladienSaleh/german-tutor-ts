@@ -13,6 +13,10 @@ import {
 } from '@mui/icons-material';
 import { useAudioRecorder } from '../hooks/useAudioRecorder.ts';
 
+interface StudyTabProps {
+  translationLang: string;
+}
+
 const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:3000' : '';
 
 interface StudyChatMsg {
@@ -104,6 +108,17 @@ function isRtlText(text: string): boolean {
   return /[؀-ۿ]/.test(text.slice(0, 80));
 }
 
+// Pronounce a selected snippet — detect its own script, default to German for Latin
+function speakSelection(text: string) {
+  window.speechSynthesis.cancel();
+  const isArabic = /[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]/.test(text);
+  const hasGerman = /[äöüßÄÖÜ]/.test(text);
+  const utter = new SpeechSynthesisUtterance(text.replace(/\*\*/g, ''));
+  utter.lang = isArabic ? 'ar' : hasGerman ? 'de-DE' : 'de-DE'; // default German in learning context
+  utter.rate = 0.85;
+  window.speechSynthesis.speak(utter);
+}
+
 const WELCOME: StudyChatMsg = {
   role: 'assistant',
   content:
@@ -116,17 +131,30 @@ const WELCOME: StudyChatMsg = {
     'ابدأ بكتابة سؤالك، أو الصق صورة (Ctrl+V)، أو سجّل صوتك!',
 };
 
+interface SelectionBubble {
+  selectedText: string;
+  x: number;       // viewport center-x of selection
+  y: number;       // viewport top-y of selection
+  above: boolean;  // render bubble above or below
+  translation: string | null;
+  loading: boolean;
+}
+
 // ── Main StudyTab component ───────────────────────────────────────────────────
-export const StudyTab: React.FC = () => {
+export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
   const [messages, setMessages] = useState<StudyChatMsg[]>([WELCOME]);
   const [inputText, setInputText] = useState('');
   const [attachedImage, setAttachedImage] = useState<AttachedImage | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [textFocused, setTextFocused] = useState(false);
+  const [bubble, setBubble] = useState<SelectionBubble | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const chatAreaRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<StudyChatMsg[]>([WELCOME]);
+  const translationLangRef = useRef(translationLang);
+  translationLangRef.current = translationLang;
 
   // Keep ref in sync
   messagesRef.current = messages;
@@ -134,6 +162,48 @@ export const StudyTab: React.FC = () => {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isGenerating]);
+
+  // ── Selection bubble ──────────────────────────────────────────────────────
+  useEffect(() => {
+    async function handleMouseUp() {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) return;
+      const text = sel.toString().trim();
+      if (text.length < 2) return;
+
+      // Only trigger inside the chat area
+      const range = sel.getRangeAt(0);
+      if (!chatAreaRef.current?.contains(range.commonAncestorContainer)) return;
+
+      const rect = range.getBoundingClientRect();
+      const above = rect.top > 120;
+      setBubble({ selectedText: text, x: rect.left + rect.width / 2, y: above ? rect.top : rect.bottom, above, translation: null, loading: true });
+
+      try {
+        const res = await fetch(`${API_BASE}/api/study/translate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, targetLang: translationLangRef.current }),
+        });
+        const data = await res.json() as { translation: string };
+        setBubble(prev => prev?.selectedText === text ? { ...prev, translation: data.translation, loading: false } : prev);
+      } catch {
+        setBubble(prev => prev ? { ...prev, loading: false } : null);
+      }
+    }
+
+    function handleMouseDown(e: MouseEvent) {
+      if ((e.target as Element).closest('[data-bubble]')) return;
+      setBubble(null);
+    }
+
+    document.addEventListener('mouseup', handleMouseUp);
+    document.addEventListener('mousedown', handleMouseDown);
+    return () => {
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.removeEventListener('mousedown', handleMouseDown);
+    };
+  }, []);
 
   // ── Image helpers ─────────────────────────────────────────────────────────
   function attachImageFile(file: File) {
@@ -302,7 +372,7 @@ export const StudyTab: React.FC = () => {
       </Box>
 
       {/* Messages */}
-      <Box sx={{ flexGrow: 1, minHeight: 0, overflowY: 'auto', px: 2, pb: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <Box ref={chatAreaRef} sx={{ flexGrow: 1, minHeight: 0, overflowY: 'auto', px: 2, pb: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
         {messages.map((m, i) => {
           const isUser = m.role === 'user';
           const rtl = isRtlText(m.content);
@@ -477,6 +547,49 @@ export const StudyTab: React.FC = () => {
           </Tooltip>
         </Box>
       </Box>
+
+      {/* Selection translation bubble — position: fixed, lives inside outer Box but renders over everything */}
+      {bubble && (
+        <Paper
+          data-bubble
+          elevation={8}
+          sx={{
+            position: 'fixed',
+            left: bubble.x,
+            top: bubble.above ? bubble.y - 8 : bubble.y + 8,
+            transform: bubble.above ? 'translate(-50%, -100%)' : 'translate(-50%, 0)',
+            zIndex: 9999,
+            px: 1.5, py: 1,
+            maxWidth: 320,
+            minWidth: 120,
+            borderRadius: 2,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1,
+            boxShadow: '0 4px 20px rgba(0,0,0,0.2)',
+          }}
+        >
+          {bubble.loading ? (
+            <CircularProgress size={16} sx={{ mx: 1 }} />
+          ) : (
+            <Typography
+              variant="body2"
+              dir={/[؀-ۿ]/.test(bubble.translation ?? '') ? 'rtl' : 'ltr'}
+              sx={{ flexGrow: 1, lineHeight: 1.4 }}
+            >
+              {bubble.translation ?? '—'}
+            </Typography>
+          )}
+          <Tooltip title="Pronounce original">
+            <IconButton size="small" onClick={() => speakSelection(bubble.selectedText)} sx={{ flexShrink: 0 }}>
+              <VolumeUpIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <IconButton size="small" onClick={() => setBubble(null)} sx={{ flexShrink: 0, opacity: 0.5 }}>
+            <CloseIcon sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Paper>
+      )}
     </Box>
   );
 };
