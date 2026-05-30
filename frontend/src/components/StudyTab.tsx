@@ -23,6 +23,33 @@ interface StudyTabProps {
 }
 
 const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:3000' : '';
+const STORAGE_KEY = 'study_messages';
+const MAX_SAVED = 120; // cap to keep localStorage lean
+
+function loadSavedMessages(welcome: StudyChatMsg): StudyChatMsg[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [welcome];
+    const msgs = JSON.parse(raw) as StudyChatMsg[];
+    return Array.isArray(msgs) && msgs.length > 0 ? msgs : [welcome];
+  } catch {
+    return [welcome];
+  }
+}
+
+function saveMessages(msgs: StudyChatMsg[]) {
+  // Strip ephemeral fields before writing
+  const toSave = msgs.slice(-MAX_SAVED).map(({ audioPreviewUrl: _p, streaming: _s, ...m }) => m);
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+  } catch {
+    // Storage quota exceeded — retry without image payloads
+    try {
+      const slim = toSave.map(({ imageBase64: _i, ...m }) => m);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
+    } catch { /* give up */ }
+  }
+}
 
 interface StudyChatMsg {
   role: 'user' | 'assistant';
@@ -213,7 +240,7 @@ const AssistantMessage: React.FC<{ msg: StudyChatMsg }> = ({ msg }) => {
 
 // ── Main StudyTab component ───────────────────────────────────────────────────
 export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
-  const [messages, setMessages] = useState<StudyChatMsg[]>([WELCOME]);
+  const [messages, setMessages] = useState<StudyChatMsg[]>(() => loadSavedMessages(WELCOME));
   const [inputText, setInputText] = useState('');
   const [attachedImage, setAttachedImage] = useState<AttachedImage | null>(null);
   const [attachedAudio, setAttachedAudio] = useState<AttachedAudio | null>(null);
@@ -238,6 +265,12 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isGenerating]);
+
+  // Persist to localStorage whenever the conversation settles (no streaming in progress)
+  useEffect(() => {
+    if (messages.some(m => m.streaming)) return;
+    saveMessages(messages);
+  }, [messages]);
 
   // ── Selection bubble ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -459,6 +492,7 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
         <Tooltip title="Clear conversation">
           <IconButton size="small" onClick={() => {
             messagesRef.current.forEach(m => { if (m.audioPreviewUrl) URL.revokeObjectURL(m.audioPreviewUrl); });
+            localStorage.removeItem(STORAGE_KEY);
             setMessages([WELCOME]);
           }} disabled={isGenerating}>
             <ClearIcon fontSize="small" />
