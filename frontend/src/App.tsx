@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { ThemeProvider, CssBaseline, Box, Paper } from '@mui/material';
+import { ThemeProvider, CssBaseline, Box, Paper, Tab, Tabs } from '@mui/material';
+import { Mic as MicIcon, MenuBook as MenuBookIcon } from '@mui/icons-material';
 import theme from './theme.ts';
 import { useWebSocket } from './hooks/useWebSocket.ts';
 import { useAudioRecorder } from './hooks/useAudioRecorder.ts';
@@ -9,6 +10,7 @@ import { RecordButton } from './components/RecordButton.tsx';
 import { ScenarioModal, type ScenarioInfo } from './components/ScenarioModal.tsx';
 import { SettingsDrawer } from './components/SettingsDrawer.tsx';
 import { StatusBar } from './components/StatusBar.tsx';
+import { StudyTab } from './components/StudyTab.tsx';
 
 type AppState = 'idle' | 'recording' | 'processing' | 'speaking';
 
@@ -18,6 +20,7 @@ const WS_BASE  = window.location.hostname === 'localhost'
   : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<'practice' | 'study'>('practice');
   const [messages, setMessages] = useState<Message[]>([]);
   const [appState, setAppState] = useState<AppState>('idle');
   const [scenarios, setScenarios] = useState<ScenarioInfo[]>([]);
@@ -110,7 +113,7 @@ export default function App() {
   }, [connect]);
 
   const handleScenarioSelect = useCallback((id: string) => {
-    unlockAudio(); // pre-unlock AudioContext from this click gesture
+    unlockAudio();
     setSelectedScenario(id);
     setShowScenarioModal(false);
     startSession(id);
@@ -124,7 +127,7 @@ export default function App() {
   // ── Audio recording ───────────────────────────────────────────────────────────
   const handleAudioReady = useCallback((blob: Blob) => {
     setAppState('processing');
-    interrupt(); // stop Lina speaking when user talks
+    interrupt();
     const reader = new FileReader();
     reader.onloadend = () => {
       const b64 = (reader.result as string).split(',')[1];
@@ -133,7 +136,8 @@ export default function App() {
     reader.readAsDataURL(blob);
   }, [send, interrupt]);
 
-  const recorderEnabled = wsStatus === 'connected' && appState !== 'processing';
+  // Only enable recorder on the practice tab
+  const recorderEnabled = activeTab === 'practice' && wsStatus === 'connected' && appState !== 'processing';
 
   const { isRecording, audioLevel, startRecording, stopRecording } = useAudioRecorder(
     handleAudioReady,
@@ -153,10 +157,35 @@ export default function App() {
         <StatusBar
           wsStatus={wsStatus}
           appState={appState}
-          scenarioTitle={selectedScenarioInfo?.title ?? ''}
+          scenarioTitle={activeTab === 'practice' ? (selectedScenarioInfo?.title ?? '') : ''}
           onReconnect={handleReconnect}
           onSettings={() => setShowSettings(true)}
         />
+
+        {/* Tab bar */}
+        <Box sx={{ bgcolor: 'background.paper', borderBottom: '1px solid', borderColor: 'divider' }}>
+          <Tabs
+            value={activeTab}
+            onChange={(_, v) => setActiveTab(v as 'practice' | 'study')}
+            variant="fullWidth"
+            sx={{ minHeight: 44 }}
+          >
+            <Tab
+              value="practice"
+              label="Practice"
+              icon={<MicIcon sx={{ fontSize: 18 }} />}
+              iconPosition="start"
+              sx={{ minHeight: 44, textTransform: 'none', fontWeight: 600, fontSize: '0.9rem' }}
+            />
+            <Tab
+              value="study"
+              label="Study"
+              icon={<MenuBookIcon sx={{ fontSize: 18 }} />}
+              iconPosition="start"
+              sx={{ minHeight: 44, textTransform: 'none', fontWeight: 600, fontSize: '0.9rem' }}
+            />
+          </Tabs>
+        </Box>
 
         <Paper sx={{
           flexGrow: 1, mx: { xs: 0, sm: 2 }, my: { xs: 0, sm: 1.5 },
@@ -164,21 +193,29 @@ export default function App() {
           display: 'flex', flexDirection: 'column',
           overflow: 'hidden', minHeight: 0,
         }}>
-          <ChatArea messages={messages} isTyping={isTyping} />
 
-          <Box sx={{
-            borderTop: '1px solid', borderColor: 'divider',
-            display: 'flex', justifyContent: 'center',
-            py: 2, px: 2,
-          }}>
-            <RecordButton
-              appState={appState}
-              audioLevel={audioLevel}
-              onPress={() => { unlockAudio(); startRecording(); }}
-              onRelease={stopRecording}
-              disabled={wsStatus !== 'connected' || appState === 'processing'}
-            />
-          </Box>
+          {/* ── Practice tab ── */}
+          {activeTab === 'practice' && (
+            <>
+              <ChatArea messages={messages} isTyping={isTyping} />
+              <Box sx={{
+                borderTop: '1px solid', borderColor: 'divider',
+                display: 'flex', justifyContent: 'center',
+                py: 2, px: 2,
+              }}>
+                <RecordButton
+                  appState={appState}
+                  audioLevel={audioLevel}
+                  onPress={() => { unlockAudio(); startRecording(); }}
+                  onRelease={stopRecording}
+                  disabled={wsStatus !== 'connected' || appState === 'processing'}
+                />
+              </Box>
+            </>
+          )}
+
+          {/* ── Study tab ── */}
+          {activeTab === 'study' && <StudyTab />}
         </Paper>
 
         <ScenarioModal

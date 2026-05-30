@@ -6,6 +6,7 @@ import { existsSync } from 'fs';
 import { config } from './config.js';
 import { listScenarios, loadScenario } from './scenarios.js';
 import { handleSession } from './session.js';
+import { streamStudyChat, type StudyMessage } from './study.js';
 import { createSTTProvider } from './providers/stt/index.js';
 import { createMainLLM, createCorrectorLLM } from './providers/llm/index.js';
 import { createTTSProvider } from './providers/tts/index.js';
@@ -47,6 +48,49 @@ app.get('/api/config', async () => ({
 }));
 
 app.get('/api/health', async () => ({ status: 'ok', uptime: process.uptime() }));
+
+// ── Study Assistant ───────────────────────────────────────────────────────────
+interface StudyChatBody {
+  history?: StudyMessage[];
+  userText?: string;
+  audioBase64?: string;
+  imageBase64?: string;
+  imageMime?: string;
+}
+
+app.post('/api/study/chat', async (req, reply) => {
+  const body = req.body as StudyChatBody;
+
+  reply.hijack();
+  const res = reply.raw;
+  const origin = (req.headers['origin'] as string | undefined) ?? '*';
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.flushHeaders();
+
+  const sse = (data: object | string) =>
+    res.write(`data: ${typeof data === 'string' ? data : JSON.stringify(data)}\n\n`);
+
+  try {
+    for await (const event of streamStudyChat(
+      body.history ?? [],
+      body.userText ?? '',
+      stt,
+      body.imageBase64,
+      body.imageMime,
+      body.audioBase64,
+    )) {
+      sse(event);
+    }
+  } catch (err) {
+    sse({ type: 'error', text: String(err) });
+  } finally {
+    sse('[DONE]');
+    res.end();
+  }
+});
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 // Registered directly on app (not scoped) and BEFORE static so the wildcard
