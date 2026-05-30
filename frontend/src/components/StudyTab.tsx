@@ -56,19 +56,48 @@ function RichText({ text }: { text: string }) {
   return <>{nodes}</>;
 }
 
-// ── Language detection for browser TTS ───────────────────────────────────────
-function detectTTSLang(text: string): string {
-  if (/[؀-ۿ]/.test(text)) return 'ar';
-  if (/[äöüßÄÖÜ]/.test(text)) return 'de-DE';
-  return 'en-US';
-}
-
+// ── Context-aware TTS: splits text into Arabic / Latin runs ──────────────────
 function speakText(text: string) {
   window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text.replace(/\*\*/g, ''));
-  utterance.lang = detectTTSLang(text);
-  utterance.rate = 0.9;
-  window.speechSynthesis.speak(utterance);
+  const clean = text.replace(/\*\*/g, '').replace(/^[-•]\s*/gm, '');
+
+  // Walk character-by-character, grouping by script
+  const segments: Array<{ text: string; script: 'arabic' | 'latin' }> = [];
+  let buf = '';
+  let lastScript: 'arabic' | 'latin' | null = null;
+
+  for (const ch of clean) {
+    const isAr = /[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]/.test(ch);
+    const isLat = /[a-zA-ZäöüßÄÖÜ]/.test(ch);
+    const script: 'arabic' | 'latin' | null = isAr ? 'arabic' : isLat ? 'latin' : null;
+
+    if (script && script !== lastScript) {
+      if (buf.trim() && lastScript) segments.push({ text: buf, script: lastScript });
+      buf = ch;
+      lastScript = script;
+    } else {
+      buf += ch;
+    }
+  }
+  if (buf.trim() && lastScript) segments.push({ text: buf, script: lastScript });
+
+  // If there's any Arabic in the response, assume Latin segments are German
+  // (the AI mixes Arabic explanations with German vocabulary)
+  const arabicContext = segments.some(s => s.script === 'arabic');
+
+  for (const seg of segments) {
+    if (!seg.text.trim()) continue;
+    const utter = new SpeechSynthesisUtterance(seg.text);
+    utter.rate = 0.9;
+    if (seg.script === 'arabic') {
+      utter.lang = 'ar';
+    } else {
+      // Has German umlauts → German; in Arabic context → German (learning German);
+      // otherwise English
+      utter.lang = (arabicContext || /[äöüßÄÖÜ]/.test(seg.text)) ? 'de-DE' : 'en-US';
+    }
+    window.speechSynthesis.speak(utter);
+  }
 }
 
 function isRtlText(text: string): boolean {
