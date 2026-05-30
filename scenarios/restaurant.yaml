@@ -1,0 +1,13 @@
+id: restaurant
+title: At the Restaurant (Im Restaurant)
+description: Ordering food and drink, asking for the bill.
+points:
+  - Welcome the student to the restaurant and ask if they have a reservation.
+  - Ask what they would like to drink.
+  - Ask if they are ready to order food.
+  - Suggest a daily special and ask if they'd like to try it.
+  - Ask if everything is okay with the meal.
+  - Ask if they would like dessert or coffee.
+  - Handle the student asking for the bill.
+  - Ask how they would like to pay (cash or card).
+  - Wish them a nice day.

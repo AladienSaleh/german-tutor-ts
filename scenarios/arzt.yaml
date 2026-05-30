@@ -1,0 +1,13 @@
+id: arzt
+title: At the Doctor (Beim Arzt)
+description: Describing symptoms and making an appointment.
+points:
+  - Greet the student at the reception and ask for their insurance card.
+  - Ask what symptoms they have or why they are here today.
+  - Ask how long they have been feeling this way.
+  - Ask if they have a fever or other specific pains.
+  - Tell them the doctor will see them in a moment.
+  - (As doctor) Ask the student to describe the pain (sharp, dull, etc.).
+  - Prescribe some medicine and explain how to take it.
+  - Tell them when they should come back if it doesn't get better.
+  - Say goodbye and wish them a speedy recovery.

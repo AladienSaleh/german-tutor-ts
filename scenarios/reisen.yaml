@@ -1,0 +1,13 @@
+id: reisen
+title: Traveling (Reisen)
+description: Buying train tickets and asking for directions.
+points:
+  - Ask the student where they want to travel to.
+  - Ask if they want a one-way or return ticket.
+  - Tell them the price and ask if they have a BahnCard.
+  - Tell them which platform the train leaves from.
+  - Ask if they need help finding a hotel at the destination.
+  - (At destination) Roleplay asking for directions to the city center.
+  - Ask the student what they plan to visit first (museum, park, etc.).
+  - Ask how they like the city so far.
+  - Wrap up the travel scenario.
