@@ -1,6 +1,8 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
-  Box, Paper, Typography, TextField, IconButton, Tooltip, CircularProgress,
+  Box, Paper, Typography, TextField, IconButton, Tooltip, CircularProgress, Divider,
 } from '@mui/material';
 import {
   Send as SendIcon,
@@ -10,6 +12,7 @@ import {
   VolumeUp as VolumeUpIcon,
   DeleteOutline as ClearIcon,
   Close as CloseIcon,
+  AutoAwesome as AIIcon,
 } from '@mui/icons-material';
 import { useAudioRecorder } from '../hooks/useAudioRecorder.ts';
 
@@ -33,39 +36,55 @@ interface AttachedImage {
   previewUrl: string;
 }
 
-// ── Minimal inline markdown (bold + line breaks) ──────────────────────────────
-function RichText({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*\n]+\*\*)/g);
-  const nodes: React.ReactNode[] = [];
-  parts.forEach((part, pi) => {
-    if (part.startsWith('**') && part.endsWith('**')) {
-      nodes.push(<strong key={pi}>{part.slice(2, -2)}</strong>);
-    } else {
-      part.split('\n').forEach((line, li) => {
-        if (li > 0) nodes.push(<br key={`${pi}-br-${li}`} />);
-        // Bullet list items
-        const trimmed = line.replace(/^[-•]\s+/, '');
-        if (trimmed !== line) {
-          nodes.push(
-            <Box key={`${pi}-${li}`} component="span" sx={{ display: 'block', pl: 1 }}>
-              {'• '}{trimmed}
-            </Box>,
-          );
-        } else {
-          nodes.push(<React.Fragment key={`${pi}-${li}`}>{line}</React.Fragment>);
-        }
-      });
-    }
-  });
-  return <>{nodes}</>;
+interface SelectionBubble {
+  selectedText: string;
+  x: number;
+  y: number;
+  above: boolean;
+  translation: string | null;
+  loading: boolean;
 }
 
-// ── Context-aware TTS: splits text into Arabic / Latin runs ──────────────────
+// ── RTL detection ─────────────────────────────────────────────────────────────
+function isRtlDominant(text: string): boolean {
+  const ar = (text.match(/[؀-ۿ]/g) ?? []).length;
+  const lat = (text.match(/[a-zA-Z]/g) ?? []).length;
+  return ar > 0 && ar >= lat * 0.4;
+}
+
+// ── Markdown container styles ─────────────────────────────────────────────────
+const mdSx = {
+  fontSize: '0.95rem',
+  lineHeight: 1.8,
+  '& p': { mb: 0.75, mt: 0, '&:last-child': { mb: 0 } },
+  '& h1,& h2': { fontWeight: 700, mt: 2, mb: 0.75, fontSize: '1.1rem', color: 'primary.dark' },
+  '& h3': { fontWeight: 700, mt: 1.5, mb: 0.5, fontSize: '1rem', color: 'primary.dark' },
+  '& h4,& h5': { fontWeight: 700, mt: 1, mb: 0.5, fontSize: '0.95rem', color: '#1a237e' },
+  '& ul,& ol': { pl: 2.5, mb: 0.75, mt: 0 },
+  '& li': { mb: 0.4, lineHeight: 1.7 },
+  '& strong': { fontWeight: 700, color: '#1a237e' },
+  '& em': { fontStyle: 'italic', color: 'text.secondary' },
+  '& hr': { my: 1.5, border: 'none', borderTop: '1px solid rgba(0,0,0,0.12)' },
+  '& code': {
+    bgcolor: 'rgba(0,0,0,0.06)', px: 0.75, py: 0.15,
+    borderRadius: 0.75, fontFamily: 'monospace', fontSize: '0.85em',
+  },
+  '& pre': { bgcolor: 'rgba(0,0,0,0.05)', p: 1.5, borderRadius: 1, overflow: 'auto', mb: 1 },
+  '& blockquote': {
+    borderLeft: '3px solid', borderColor: 'primary.light',
+    pl: 1.5, ml: 0, my: 1, color: 'text.secondary', fontStyle: 'italic',
+  },
+  '& table': { borderCollapse: 'collapse', width: '100%', mb: 1 },
+  '& th,& td': { border: '1px solid rgba(0,0,0,0.15)', px: 1, py: 0.5, textAlign: 'start' },
+  '& th': { bgcolor: 'rgba(0,0,0,0.05)', fontWeight: 700 },
+};
+
+// ── Context-aware TTS ─────────────────────────────────────────────────────────
 function speakText(text: string) {
   window.speechSynthesis.cancel();
-  const clean = text.replace(/\*\*/g, '').replace(/^[-•]\s*/gm, '');
+  // Strip markdown symbols before speaking
+  const clean = text.replace(/#{1,6}\s/g, '').replace(/\*{1,2}/g, '').replace(/^[-*]\s+/gm, '').replace(/---+/g, '');
 
-  // Walk character-by-character, grouping by script
   const segments: Array<{ text: string; script: 'arabic' | 'latin' }> = [];
   let buf = '';
   let lastScript: 'arabic' | 'latin' | null = null;
@@ -85,60 +104,102 @@ function speakText(text: string) {
   }
   if (buf.trim() && lastScript) segments.push({ text: buf, script: lastScript });
 
-  // If there's any Arabic in the response, assume Latin segments are German
-  // (the AI mixes Arabic explanations with German vocabulary)
   const arabicContext = segments.some(s => s.script === 'arabic');
-
   for (const seg of segments) {
     if (!seg.text.trim()) continue;
     const utter = new SpeechSynthesisUtterance(seg.text);
     utter.rate = 0.9;
-    if (seg.script === 'arabic') {
-      utter.lang = 'ar';
-    } else {
-      // Has German umlauts → German; in Arabic context → German (learning German);
-      // otherwise English
-      utter.lang = (arabicContext || /[äöüßÄÖÜ]/.test(seg.text)) ? 'de-DE' : 'en-US';
-    }
+    utter.lang = seg.script === 'arabic' ? 'ar'
+      : (arabicContext || /[äöüßÄÖÜ]/.test(seg.text)) ? 'de-DE' : 'en-US';
     window.speechSynthesis.speak(utter);
   }
 }
 
-function isRtlText(text: string): boolean {
-  return /[؀-ۿ]/.test(text.slice(0, 80));
-}
-
-// Pronounce a selected snippet — detect its own script, default to German for Latin
 function speakSelection(text: string) {
   window.speechSynthesis.cancel();
-  const isArabic = /[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]/.test(text);
-  const hasGerman = /[äöüßÄÖÜ]/.test(text);
+  const isArabic = /[؀-ۿ]/.test(text);
   const utter = new SpeechSynthesisUtterance(text.replace(/\*\*/g, ''));
-  utter.lang = isArabic ? 'ar' : hasGerman ? 'de-DE' : 'de-DE'; // default German in learning context
+  utter.lang = isArabic ? 'ar' : 'de-DE';
   utter.rate = 0.85;
   window.speechSynthesis.speak(utter);
 }
 
+// ── Welcome message ───────────────────────────────────────────────────────────
 const WELCOME: StudyChatMsg = {
   role: 'assistant',
   content:
-    'مرحباً! أنا مساعدك للدراسة.\n\n' +
+    'مرحباً! أنا مساعدك للدراسة 📚\n\n' +
     'يمكنني مساعدتك في:\n' +
-    '- الترجمة بين العربية والألمانية والإنجليزية\n' +
-    '- شرح قواعد اللغة الألمانية بالعربية\n' +
-    '- تحليل الصور من كتبك أو دوراتك\n' +
-    '- الإجابة عن أي سؤال بلغة التعلم\n\n' +
-    'ابدأ بكتابة سؤالك، أو الصق صورة (Ctrl+V)، أو سجّل صوتك!',
+    '- **الترجمة** بين العربية والألمانية والإنجليزية\n' +
+    '- **شرح قواعد** اللغة الألمانية بالعربية\n' +
+    '- **تحليل الصور** من كتبك أو دوراتك (الصق بـ Ctrl+V)\n' +
+    '- **الإجابة** عن أي سؤال\n\n' +
+    '*تلميح: حدّد أي نص لترجمته فوراً!*',
 };
 
-interface SelectionBubble {
-  selectedText: string;
-  x: number;       // viewport center-x of selection
-  y: number;       // viewport top-y of selection
-  above: boolean;  // render bubble above or below
-  translation: string | null;
-  loading: boolean;
-}
+// ── AssistantMessage component ────────────────────────────────────────────────
+const AssistantMessage: React.FC<{ msg: StudyChatMsg }> = ({ msg }) => {
+  const rtl = isRtlDominant(msg.content);
+  const displayContent = msg.streaming ? msg.content + ' ▌' : msg.content;
+
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, width: '100%' }}>
+      {/* Label row */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, px: 0.5 }}>
+        <Box sx={{
+          width: 22, height: 22, borderRadius: '50%',
+          bgcolor: 'primary.main', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <AIIcon sx={{ fontSize: 13, color: 'white' }} />
+        </Box>
+        <Typography variant="caption" sx={{ color: 'text.disabled', fontWeight: 600, letterSpacing: 0.3 }}>
+          Study Assistant
+        </Typography>
+      </Box>
+
+      {/* Content card */}
+      <Box sx={{
+        width: '100%',
+        bgcolor: '#f0faf2',
+        borderRadius: '0 12px 12px 12px',
+        border: '1px solid rgba(76,175,80,0.15)',
+        px: 2.5, py: 1.75,
+        overflow: 'hidden',
+      }}>
+        {msg.content === '' && msg.streaming ? (
+          /* Typing dots */
+          <Box sx={{ display: 'flex', gap: '5px', alignItems: 'center', py: 0.5 }}>
+            {[0, 1, 2].map(i => (
+              <Box key={i} sx={{
+                width: 7, height: 7, borderRadius: '50%', bgcolor: 'primary.light',
+                animation: 'blink 1.4s infinite both',
+                animationDelay: `${i * 0.2}s`,
+              }} />
+            ))}
+          </Box>
+        ) : (
+          <Box dir={rtl ? 'rtl' : 'ltr'} sx={mdSx}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {displayContent}
+            </ReactMarkdown>
+          </Box>
+        )}
+      </Box>
+
+      {/* Speak button */}
+      {!msg.streaming && msg.content && (
+        <Box sx={{ display: 'flex', px: 0.5 }}>
+          <Tooltip title="Read aloud">
+            <IconButton size="small" onClick={() => speakText(msg.content)}
+              sx={{ opacity: 0.45, '&:hover': { opacity: 1 }, p: 0.5 }}>
+              <VolumeUpIcon sx={{ fontSize: 16 }} />
+            </IconButton>
+          </Tooltip>
+        </Box>
+      )}
+    </Box>
+  );
+};
 
 // ── Main StudyTab component ───────────────────────────────────────────────────
 export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
@@ -155,8 +216,6 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
   const messagesRef = useRef<StudyChatMsg[]>([WELCOME]);
   const translationLangRef = useRef(translationLang);
   translationLangRef.current = translationLang;
-
-  // Keep ref in sync
   messagesRef.current = messages;
 
   useEffect(() => {
@@ -171,7 +230,6 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
       const text = sel.toString().trim();
       if (text.length < 2) return;
 
-      // Only trigger inside the chat area
       const range = sel.getRangeAt(0);
       if (!chatAreaRef.current?.contains(range.commonAncestorContainer)) return;
 
@@ -208,12 +266,10 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
   // ── Image helpers ─────────────────────────────────────────────────────────
   function attachImageFile(file: File) {
     if (!file.type.startsWith('image/')) return;
-    const mime = file.type;
     const reader = new FileReader();
     reader.onloadend = () => {
       const dataUrl = reader.result as string;
-      const base64 = dataUrl.split(',')[1];
-      setAttachedImage({ base64, mime, previewUrl: dataUrl });
+      setAttachedImage({ base64: dataUrl.split(',')[1], mime: file.type, previewUrl: dataUrl });
     };
     reader.readAsDataURL(file);
   }
@@ -234,17 +290,19 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
     imageBase64?: string;
     imageMime?: string;
   }) => {
-    const { userText = inputText, audioBase64, imageBase64 = attachedImage?.base64, imageMime = attachedImage?.mime } = opts;
+    const {
+      userText = inputText,
+      audioBase64,
+      imageBase64 = attachedImage?.base64,
+      imageMime = attachedImage?.mime,
+    } = opts;
     const trimmed = (userText ?? '').trim();
-
     if (!trimmed && !audioBase64 && !imageBase64) return;
     if (isGenerating) return;
 
     abortRef.current?.abort();
     abortRef.current = new AbortController();
 
-    // For text/image: add user message immediately
-    // For audio: wait for transcript event
     const history = messagesRef.current.filter(m => !m.streaming);
     let historyForRequest = history;
 
@@ -253,7 +311,6 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
       setMessages(prev => [...prev, userMsg, { role: 'assistant', content: '', streaming: true }]);
       historyForRequest = [...history, userMsg];
     } else {
-      // Placeholder assistant message — user message will be inserted on transcript event
       setMessages(prev => [...prev, { role: 'assistant', content: '', streaming: true }]);
     }
 
@@ -275,9 +332,7 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
         signal: abortRef.current.signal,
       });
 
-      if (!resp.ok || !resp.body) {
-        throw new Error(`Server error: ${resp.status}`);
-      }
+      if (!resp.ok || !resp.body) throw new Error(`Server error: ${resp.status}`);
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
@@ -302,11 +357,7 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
           if (event.type === 'transcript' && !transcriptInserted) {
             transcriptInserted = true;
             const userMsg: StudyChatMsg = { role: 'user', content: event.text!, imageBase64, imageMime };
-            // Insert user message before the streaming assistant bubble
-            setMessages(prev => {
-              const rest = prev.slice(0, -1); // remove streaming assistant
-              return [...rest, userMsg, { role: 'assistant', content: '', streaming: true }];
-            });
+            setMessages(prev => [...prev.slice(0, -1), userMsg, { role: 'assistant', content: '', streaming: true }]);
           } else if (event.type === 'token') {
             setMessages(prev => {
               const last = prev[prev.length - 1];
@@ -324,10 +375,10 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
       if ((err as Error).name !== 'AbortError') {
         setMessages(prev => {
           const last = prev[prev.length - 1];
-          if (last?.role === 'assistant' && last.streaming) {
-            return [...prev.slice(0, -1), { ...last, content: `⚠ ${(err as Error).message}`, streaming: false }];
-          }
-          return [...prev, { role: 'assistant', content: `⚠ ${(err as Error).message}` }];
+          const errMsg = { role: 'assistant' as const, content: `⚠ ${(err as Error).message}` };
+          return last?.role === 'assistant' && last.streaming
+            ? [...prev.slice(0, -1), errMsg]
+            : [...prev, errMsg];
         });
       }
     } finally {
@@ -337,12 +388,11 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inputText, attachedImage, isGenerating]);
 
-  // ── Audio recording ───────────────────────────────────────────────────────
+  // ── Audio ─────────────────────────────────────────────────────────────────
   const handleAudioReady = useCallback((blob: Blob) => {
     const reader = new FileReader();
     reader.onloadend = () => {
-      const b64 = (reader.result as string).split(',')[1];
-      void sendMessage({ audioBase64: b64 });
+      void sendMessage({ audioBase64: (reader.result as string).split(',')[1] });
     };
     reader.readAsDataURL(blob);
   }, [sendMessage]);
@@ -353,17 +403,14 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
   );
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      void sendMessage({});
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void sendMessage({}); }
   };
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
 
-      {/* Toolbar */}
-      <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 1.5, pt: 1 }}>
+      {/* Top bar */}
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', px: 1.5, py: 0.75, borderBottom: '1px solid', borderColor: 'divider' }}>
         <Tooltip title="Clear conversation">
           <IconButton size="small" onClick={() => setMessages([WELCOME])} disabled={isGenerating}>
             <ClearIcon fontSize="small" />
@@ -372,115 +419,72 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
       </Box>
 
       {/* Messages */}
-      <Box ref={chatAreaRef} sx={{ flexGrow: 1, minHeight: 0, overflowY: 'auto', px: 2, pb: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <Box
+        ref={chatAreaRef}
+        sx={{ flexGrow: 1, minHeight: 0, overflowY: 'auto', px: { xs: 1.5, sm: 2.5 }, py: 2, display: 'flex', flexDirection: 'column', gap: 2.5 }}
+      >
         {messages.map((m, i) => {
-          const isUser = m.role === 'user';
-          const rtl = isRtlText(m.content);
+          if (m.role === 'assistant') {
+            return <AssistantMessage key={i} msg={m} />;
+          }
 
+          // User message
+          const rtl = isRtlDominant(m.content);
           return (
-            <Box key={i} sx={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start', flexDirection: 'column', alignItems: isUser ? 'flex-end' : 'flex-start' }}>
-              {/* Image thumbnail (user messages) */}
-              {isUser && m.imageBase64 && (
+            <Box key={i} sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 0.5 }}>
+              {m.imageBase64 && (
                 <Box
                   component="img"
                   src={`data:${m.imageMime ?? 'image/jpeg'};base64,${m.imageBase64}`}
                   alt="attached"
-                  sx={{ maxWidth: 220, maxHeight: 160, borderRadius: 2, mb: 0.5, border: '1px solid', borderColor: 'divider', objectFit: 'cover' }}
+                  sx={{ maxWidth: 240, maxHeight: 180, borderRadius: 2, border: '1px solid', borderColor: 'divider', objectFit: 'cover' }}
                 />
               )}
-
               <Paper elevation={0} sx={{
-                px: 2, py: 1.25, maxWidth: '82%',
-                bgcolor: isUser ? '#e3f2fd' : '#f1f8e9',
-                borderRadius: isUser ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
+                px: 2, py: 1.25, maxWidth: '80%',
+                bgcolor: '#e8f4fd',
+                borderRadius: '16px 16px 4px 16px',
+                border: '1px solid rgba(33,150,243,0.15)',
               }}>
-                <Typography
-                  variant="body1"
-                  dir={rtl ? 'rtl' : 'ltr'}
-                  component="div"
-                  sx={{
-                    lineHeight: 1.65,
-                    ...(m.streaming && {
-                      '&::after': { content: '"▋"', animation: 'blink 0.8s step-start infinite' },
-                    }),
-                  }}
-                >
-                  <RichText text={m.content} />
+                <Typography variant="body1" dir={rtl ? 'rtl' : 'ltr'} sx={{ lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>
+                  {m.content || <em style={{ opacity: 0.5 }}>…</em>}
                 </Typography>
               </Paper>
-
-              {/* Speak button on finished assistant messages */}
-              {!isUser && !m.streaming && m.content && (
-                <Tooltip title="Read aloud">
-                  <IconButton size="small" sx={{ mt: 0.25, opacity: 0.5, '&:hover': { opacity: 1 } }} onClick={() => speakText(m.content)}>
-                    <VolumeUpIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-              )}
             </Box>
           );
         })}
 
-        {isGenerating && messages[messages.length - 1]?.content === '' && (
-          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', px: 1 }}>
-            {[0, 1, 2].map(i => (
-              <Box key={i} sx={{
-                width: 7, height: 7, borderRadius: '50%', bgcolor: 'primary.light',
-                animation: 'blink 1.4s infinite both',
-                animationDelay: `${i * 0.2}s`,
-              }} />
-            ))}
-          </Box>
-        )}
-
         <div ref={bottomRef} />
       </Box>
 
-      {/* Input area */}
-      <Box sx={{ borderTop: '1px solid', borderColor: 'divider', px: 1.5, pt: 1, pb: 1.5 }}>
+      <Divider />
 
-        {/* Attached image preview */}
+      {/* Input area */}
+      <Box sx={{ px: 1.5, pt: 1, pb: 1.25 }}>
+        {/* Image preview */}
         {attachedImage && (
           <Box sx={{ position: 'relative', display: 'inline-block', mb: 1 }}>
-            <Box
-              component="img"
-              src={attachedImage.previewUrl}
-              alt="To attach"
-              sx={{ maxWidth: 140, maxHeight: 100, borderRadius: 2, border: '1px solid', borderColor: 'divider', objectFit: 'cover', display: 'block' }}
-            />
-            <IconButton
-              size="small"
-              onClick={() => setAttachedImage(null)}
-              sx={{ position: 'absolute', top: -8, right: -8, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', p: 0.25 }}
-            >
-              <CloseIcon sx={{ fontSize: 14 }} />
+            <Box component="img" src={attachedImage.previewUrl} alt="To attach"
+              sx={{ maxWidth: 130, maxHeight: 90, borderRadius: 1.5, border: '1px solid', borderColor: 'divider', objectFit: 'cover', display: 'block' }} />
+            <IconButton size="small" onClick={() => setAttachedImage(null)}
+              sx={{ position: 'absolute', top: -8, right: -8, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', p: 0.25 }}>
+              <CloseIcon sx={{ fontSize: 13 }} />
             </IconButton>
           </Box>
         )}
 
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-end' }}>
-          {/* Image attach */}
+        <Box sx={{ display: 'flex', gap: 0.75, alignItems: 'flex-end' }}>
           <Tooltip title="Attach image (or paste Ctrl+V)">
-            <IconButton size="small" onClick={() => fileInputRef.current?.click()} disabled={isGenerating}>
+            <IconButton size="small" onClick={() => fileInputRef.current?.click()} disabled={isGenerating} sx={{ mb: 0.25 }}>
               <AttachFileIcon fontSize="small" />
             </IconButton>
           </Tooltip>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            hidden
-            onChange={e => { if (e.target.files?.[0]) attachImageFile(e.target.files[0]); e.target.value = ''; }}
-          />
+          <input ref={fileInputRef} type="file" accept="image/*" hidden
+            onChange={e => { if (e.target.files?.[0]) attachImageFile(e.target.files[0]); e.target.value = ''; }} />
 
-          {/* Text input */}
           <TextField
-            multiline
-            maxRows={5}
-            fullWidth
-            size="small"
-            variant="outlined"
-            placeholder="اسأل أي سؤال... / Frag mich etwas... (Shift+Enter for new line)"
+            multiline maxRows={5} fullWidth size="small" variant="outlined"
+            placeholder="اسأل سؤالاً... / Frag mich... (Shift+Enter for new line)"
             value={inputText}
             onChange={e => setInputText(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -488,104 +492,81 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
             onFocus={() => setTextFocused(true)}
             onBlur={() => setTextFocused(false)}
             disabled={isGenerating}
-            sx={{ '& .MuiOutlinedInput-root': { borderRadius: 3 } }}
+            sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2.5, fontSize: '0.95rem' } }}
           />
 
-          {/* Mic / Stop */}
           {isRecording ? (
             <Tooltip title="Stop recording">
-              <IconButton
-                color="error"
-                onClick={stopRecording}
-                sx={{
-                  bgcolor: 'error.main', color: 'white',
-                  '&:hover': { bgcolor: 'error.dark' },
-                  position: 'relative',
-                  '&::after': {
-                    content: '""',
-                    position: 'absolute', inset: 0, borderRadius: '50%',
-                    bgcolor: 'error.main',
-                    transform: `scale(${1 + audioLevel * 0.5})`,
-                    opacity: 0.3,
-                    transition: 'transform 0.1s',
-                    zIndex: -1,
-                  },
-                }}
-              >
+              <IconButton color="error" onClick={stopRecording} sx={{
+                mb: 0.25, bgcolor: 'error.main', color: 'white', '&:hover': { bgcolor: 'error.dark' },
+                boxShadow: `0 0 0 ${Math.round(audioLevel * 12)}px rgba(211,47,47,0.2)`,
+                transition: 'box-shadow 0.1s',
+              }}>
                 <StopIcon />
               </IconButton>
             </Tooltip>
           ) : (
-            <Tooltip title="Hold to record voice (or press Space)">
+            <Tooltip title="Hold to record (or press Space)">
               <span>
-                <IconButton
-                  color="primary"
-                  onMouseDown={startRecording}
-                  onMouseUp={stopRecording}
-                  onTouchStart={startRecording}
-                  onTouchEnd={stopRecording}
-                  disabled={isGenerating}
-                >
+                <IconButton color="primary" onMouseDown={startRecording} onMouseUp={stopRecording}
+                  onTouchStart={startRecording} onTouchEnd={stopRecording}
+                  disabled={isGenerating} sx={{ mb: 0.25 }}>
                   <MicIcon />
                 </IconButton>
               </span>
             </Tooltip>
           )}
 
-          {/* Send */}
           <Tooltip title="Send (Enter)">
             <span>
               <IconButton
-                color="primary"
                 onClick={() => void sendMessage({})}
                 disabled={isGenerating || (!inputText.trim() && !attachedImage)}
-                sx={{ bgcolor: 'primary.main', color: 'white', '&:hover': { bgcolor: 'primary.dark' }, '&.Mui-disabled': { bgcolor: 'action.disabledBackground' } }}
+                sx={{
+                  mb: 0.25, bgcolor: 'primary.main', color: 'white',
+                  '&:hover': { bgcolor: 'primary.dark' },
+                  '&.Mui-disabled': { bgcolor: 'action.disabledBackground', color: 'text.disabled' },
+                }}
               >
-                {isGenerating ? <CircularProgress size={20} color="inherit" /> : <SendIcon />}
+                {isGenerating
+                  ? <CircularProgress size={20} sx={{ color: 'primary.main' }} />
+                  : <SendIcon />}
               </IconButton>
             </span>
           </Tooltip>
         </Box>
       </Box>
 
-      {/* Selection translation bubble — position: fixed, lives inside outer Box but renders over everything */}
+      {/* Selection translation bubble */}
       {bubble && (
-        <Paper
-          data-bubble
-          elevation={8}
-          sx={{
-            position: 'fixed',
-            left: bubble.x,
-            top: bubble.above ? bubble.y - 8 : bubble.y + 8,
-            transform: bubble.above ? 'translate(-50%, -100%)' : 'translate(-50%, 0)',
-            zIndex: 9999,
-            px: 1.5, py: 1,
-            maxWidth: 320,
-            minWidth: 120,
-            borderRadius: 2,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 1,
-            boxShadow: '0 4px 20px rgba(0,0,0,0.2)',
-          }}
-        >
+        <Paper data-bubble elevation={8} sx={{
+          position: 'fixed',
+          left: bubble.x,
+          top: bubble.above ? bubble.y - 8 : bubble.y + 8,
+          transform: bubble.above ? 'translate(-50%, -100%)' : 'translate(-50%, 0)',
+          zIndex: 9999,
+          px: 1.5, py: 0.75,
+          maxWidth: 340, minWidth: 100,
+          borderRadius: 2,
+          display: 'flex', alignItems: 'center', gap: 0.75,
+          boxShadow: '0 6px 24px rgba(0,0,0,0.18)',
+          border: '1px solid rgba(0,0,0,0.08)',
+        }}>
           {bubble.loading ? (
-            <CircularProgress size={16} sx={{ mx: 1 }} />
+            <CircularProgress size={16} sx={{ mx: 0.5 }} />
           ) : (
-            <Typography
-              variant="body2"
+            <Typography variant="body2"
               dir={/[؀-ۿ]/.test(bubble.translation ?? '') ? 'rtl' : 'ltr'}
-              sx={{ flexGrow: 1, lineHeight: 1.4 }}
-            >
+              sx={{ flexGrow: 1, lineHeight: 1.5, fontSize: '0.85rem' }}>
               {bubble.translation ?? '—'}
             </Typography>
           )}
           <Tooltip title="Pronounce original">
-            <IconButton size="small" onClick={() => speakSelection(bubble.selectedText)} sx={{ flexShrink: 0 }}>
-              <VolumeUpIcon fontSize="small" />
+            <IconButton size="small" onClick={() => speakSelection(bubble.selectedText)} sx={{ flexShrink: 0, p: 0.5 }}>
+              <VolumeUpIcon sx={{ fontSize: 17 }} />
             </IconButton>
           </Tooltip>
-          <IconButton size="small" onClick={() => setBubble(null)} sx={{ flexShrink: 0, opacity: 0.5 }}>
+          <IconButton size="small" onClick={() => setBubble(null)} sx={{ flexShrink: 0, p: 0.5, opacity: 0.45 }}>
             <CloseIcon sx={{ fontSize: 14 }} />
           </IconButton>
         </Paper>
