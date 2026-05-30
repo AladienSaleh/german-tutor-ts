@@ -54,6 +54,7 @@ interface StudyChatBody {
   history?: StudyMessage[];
   userText?: string;
   audioBase64?: string;
+  uploadedAudioBase64?: string;
   imageBase64?: string;
   imageMime?: string;
 }
@@ -81,6 +82,7 @@ app.post('/api/study/chat', async (req, reply) => {
       body.imageBase64,
       body.imageMime,
       body.audioBase64,
+      body.uploadedAudioBase64,
     )) {
       sse(event);
     }

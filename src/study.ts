@@ -232,32 +232,51 @@ export async function quickTranslate(text: string, targetLang: string): Promise<
 
 // ── Streaming study chat ──────────────────────────────────────────────────────
 
+async function transcribeBuffer(buf: Buffer, stt: STTProvider): Promise<string> {
+  let pcm = await decodeWebmToPcm(buf); // ffmpeg handles MP3/WAV/M4A/OGG/etc.
+  if (pcm.byteLength === 0 || durationSec(pcm) < MIN_AUDIO_SEC) return '';
+  pcm = normalizeF32(pcm);
+  pcm = padF32(pcm);
+  const { text } = await stt.transcribe(pcm);
+  return text.trim();
+}
+
 export async function* streamStudyChat(
   history: StudyMessage[],
   userText: string,
   stt: STTProvider,
   imageBase64?: string,
   imageMime?: string,
-  audioBase64?: string,
+  audioBase64?: string,        // mic recording — transcript replaces userText
+  uploadedAudioBase64?: string, // audio file — transcript combined with userText as context
 ): AsyncGenerator<StudyEvent> {
   let finalText = userText.trim();
 
-  // Transcribe audio if provided
+  // Mic recording: transcript becomes the user message
   if (audioBase64) {
     try {
-      const webm = Buffer.from(audioBase64, 'base64');
-      let pcm = await decodeWebmToPcm(webm);
-      if (pcm.byteLength > 0 && durationSec(pcm) >= MIN_AUDIO_SEC) {
-        pcm = normalizeF32(pcm);
-        pcm = padF32(pcm);
-        const { text } = await stt.transcribe(pcm);
-        if (text.trim()) {
-          finalText = text.trim();
-          yield { type: 'transcript', text: finalText };
-        }
+      const text = await transcribeBuffer(Buffer.from(audioBase64, 'base64'), stt);
+      if (text) {
+        finalText = text;
+        yield { type: 'transcript', text: finalText };
       }
     } catch (err) {
-      console.error('[Study] STT error:', err);
+      console.error('[Study] STT mic error:', err);
+    }
+  }
+
+  // Uploaded audio file: transcript becomes study content, combined with typed question
+  if (uploadedAudioBase64) {
+    try {
+      const text = await transcribeBuffer(Buffer.from(uploadedAudioBase64, 'base64'), stt);
+      if (text) {
+        finalText = finalText
+          ? `**[نص الصوت المرفق / Audio transcript:]**\n${text}\n\n**[سؤالك / Your question:]**\n${finalText}`
+          : `**[نص الصوت المرفق / Audio transcript:]**\n${text}`;
+        yield { type: 'transcript', text: finalText };
+      }
+    } catch (err) {
+      console.error('[Study] STT file error:', err);
     }
   }
 

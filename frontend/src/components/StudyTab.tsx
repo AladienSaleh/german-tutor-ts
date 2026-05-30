@@ -13,6 +13,8 @@ import {
   DeleteOutline as ClearIcon,
   Close as CloseIcon,
   AutoAwesome as AIIcon,
+  AudioFile as AudioFileIcon,
+  GraphicEq as WaveIcon,
 } from '@mui/icons-material';
 import { useAudioRecorder } from '../hooks/useAudioRecorder.ts';
 
@@ -27,6 +29,7 @@ interface StudyChatMsg {
   content: string;
   imageBase64?: string;
   imageMime?: string;
+  audioFileName?: string;
   streaming?: boolean;
 }
 
@@ -34,6 +37,12 @@ interface AttachedImage {
   base64: string;
   mime: string;
   previewUrl: string;
+}
+
+interface AttachedAudio {
+  base64: string;
+  name: string;
+  previewUrl: string; // object URL for <audio> element
 }
 
 interface SelectionBubble {
@@ -206,17 +215,24 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
   const [messages, setMessages] = useState<StudyChatMsg[]>([WELCOME]);
   const [inputText, setInputText] = useState('');
   const [attachedImage, setAttachedImage] = useState<AttachedImage | null>(null);
+  const [attachedAudio, setAttachedAudio] = useState<AttachedAudio | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [textFocused, setTextFocused] = useState(false);
   const [bubble, setBubble] = useState<SelectionBubble | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const audioFileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const chatAreaRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<StudyChatMsg[]>([WELCOME]);
   const translationLangRef = useRef(translationLang);
   translationLangRef.current = translationLang;
   messagesRef.current = messages;
+
+  // Revoke audio object URLs when cleared
+  useEffect(() => () => {
+    if (attachedAudio) URL.revokeObjectURL(attachedAudio.previewUrl);
+  }, [attachedAudio]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -274,6 +290,18 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
     reader.readAsDataURL(file);
   }
 
+  function attachAudioFile(file: File) {
+    if (!file.type.startsWith('audio/')) return;
+    if (attachedAudio) URL.revokeObjectURL(attachedAudio.previewUrl);
+    const previewUrl = URL.createObjectURL(file);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64 = (reader.result as string).split(',')[1];
+      setAttachedAudio({ base64, name: file.name, previewUrl });
+    };
+    reader.readAsDataURL(file);
+  }
+
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const imageItem = Array.from(e.clipboardData.items).find(i => i.type.startsWith('image/'));
     if (imageItem) {
@@ -289,16 +317,20 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
     audioBase64?: string;
     imageBase64?: string;
     imageMime?: string;
+    uploadedAudioBase64?: string;
+    uploadedAudioName?: string;
   }) => {
     const {
       userText = inputText,
       audioBase64,
       imageBase64 = attachedImage?.base64,
       imageMime = attachedImage?.mime,
+      uploadedAudioBase64 = attachedAudio?.base64,
+      uploadedAudioName = attachedAudio?.name,
     } = opts;
     const trimmed = (userText ?? '').trim();
-    if (!trimmed && !audioBase64 && !imageBase64) return;
-    if (isGenerating) return;
+    const hasInput = trimmed || audioBase64 || imageBase64 || uploadedAudioBase64;
+    if (!hasInput || isGenerating) return;
 
     abortRef.current?.abort();
     abortRef.current = new AbortController();
@@ -306,7 +338,10 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
     const history = messagesRef.current.filter(m => !m.streaming);
     let historyForRequest = history;
 
-    if (!audioBase64) {
+    // For mic recording OR uploaded audio: wait for transcript event to add user message
+    const needsTranscript = !!audioBase64 || !!uploadedAudioBase64;
+
+    if (!needsTranscript) {
       const userMsg: StudyChatMsg = { role: 'user', content: trimmed, imageBase64, imageMime };
       setMessages(prev => [...prev, userMsg, { role: 'assistant', content: '', streaming: true }]);
       historyForRequest = [...history, userMsg];
@@ -316,6 +351,8 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
 
     setInputText('');
     setAttachedImage(null);
+    if (attachedAudio) URL.revokeObjectURL(attachedAudio.previewUrl);
+    setAttachedAudio(null);
     setIsGenerating(true);
 
     try {
@@ -328,6 +365,7 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
           audioBase64,
           imageBase64,
           imageMime,
+          uploadedAudioBase64,
         }),
         signal: abortRef.current.signal,
       });
@@ -356,7 +394,11 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
 
           if (event.type === 'transcript' && !transcriptInserted) {
             transcriptInserted = true;
-            const userMsg: StudyChatMsg = { role: 'user', content: event.text!, imageBase64, imageMime };
+            const userMsg: StudyChatMsg = {
+              role: 'user', content: event.text!,
+              imageBase64, imageMime,
+              audioFileName: uploadedAudioName,
+            };
             setMessages(prev => [...prev.slice(0, -1), userMsg, { role: 'assistant', content: '', streaming: true }]);
           } else if (event.type === 'token') {
             setMessages(prev => {
@@ -432,6 +474,12 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
           const rtl = isRtlDominant(m.content);
           return (
             <Box key={i} sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 0.5 }}>
+              {m.audioFileName && (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, px: 1.25, py: 0.5, bgcolor: 'rgba(33,150,243,0.08)', borderRadius: 2, mb: 0.5 }}>
+                  <WaveIcon sx={{ fontSize: 16, color: 'primary.main' }} />
+                  <Typography variant="caption" sx={{ color: 'primary.dark', fontWeight: 500 }}>{m.audioFileName}</Typography>
+                </Box>
+              )}
               {m.imageBase64 && (
                 <Box
                   component="img"
@@ -473,6 +521,24 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
           </Box>
         )}
 
+        {/* Audio file preview */}
+        {attachedAudio && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, p: 1, bgcolor: 'grey.50', border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
+            <AudioFileIcon color="primary" />
+            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+              <Typography variant="caption" noWrap sx={{ display: 'block', fontWeight: 600, color: 'text.primary' }}>
+                {attachedAudio.name}
+              </Typography>
+              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+              <audio controls src={attachedAudio.previewUrl} style={{ width: '100%', height: 28, marginTop: 2 }} />
+            </Box>
+            <IconButton size="small" onClick={() => { URL.revokeObjectURL(attachedAudio.previewUrl); setAttachedAudio(null); }}
+              sx={{ flexShrink: 0 }}>
+              <CloseIcon sx={{ fontSize: 14 }} />
+            </IconButton>
+          </Box>
+        )}
+
         <Box sx={{ display: 'flex', gap: 0.75, alignItems: 'flex-end' }}>
           <Tooltip title="Attach image (or paste Ctrl+V)">
             <IconButton size="small" onClick={() => fileInputRef.current?.click()} disabled={isGenerating} sx={{ mb: 0.25 }}>
@@ -481,6 +547,14 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
           </Tooltip>
           <input ref={fileInputRef} type="file" accept="image/*" hidden
             onChange={e => { if (e.target.files?.[0]) attachImageFile(e.target.files[0]); e.target.value = ''; }} />
+
+          <Tooltip title="Attach audio file (MP3, WAV, M4A…)">
+            <IconButton size="small" onClick={() => audioFileInputRef.current?.click()} disabled={isGenerating} sx={{ mb: 0.25 }}>
+              <AudioFileIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <input ref={audioFileInputRef} type="file" accept="audio/*" hidden
+            onChange={e => { if (e.target.files?.[0]) attachAudioFile(e.target.files[0]); e.target.value = ''; }} />
 
           <TextField
             multiline maxRows={5} fullWidth size="small" variant="outlined"
