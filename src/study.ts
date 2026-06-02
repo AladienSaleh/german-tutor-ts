@@ -1,4 +1,5 @@
 import { config } from './config.js';
+import { llmSettings } from './llm-settings.js';
 import { decodeWebmToPcm, normalizeF32, padF32, durationSec, MIN_AUDIO_SEC } from './audio.js';
 import type { STTProvider } from './providers/stt/interface.js';
 
@@ -36,7 +37,6 @@ async function* streamWithAnthropic(messages: StudyMessage[]): AsyncGenerator<st
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey: config.apiKeys.anthropic });
 
-  // Build messages with optional image blocks
   const anthropicMsgs = messages.map(m => {
     if (m.role === 'user' && m.imageBase64) {
       return {
@@ -62,7 +62,8 @@ async function* streamWithAnthropic(messages: StudyMessage[]): AsyncGenerator<st
 
   const stream = await client.messages.create({
     model: config.llm.anthropicModel,
-    max_tokens: 1024,
+    max_tokens: 6000,
+    thinking: { type: 'enabled', budget_tokens: 1500 },
     system: STUDY_SYSTEM_PROMPT,
     messages: anthropicMsgs,
     stream: true,
@@ -97,7 +98,7 @@ async function* streamWithOpenAI(messages: StudyMessage[]): AsyncGenerator<strin
 
   const stream = await client.chat.completions.create({
     model: config.llm.openaiModel,
-    max_tokens: 1024,
+    max_tokens: 4096,
     messages: [{ role: 'system', content: STUDY_SYSTEM_PROMPT }, ...openaiMsgs],
     stream: true,
   });
@@ -109,6 +110,11 @@ async function* streamWithOpenAI(messages: StudyMessage[]): AsyncGenerator<strin
 }
 
 async function* streamWithOllama(messages: StudyMessage[]): AsyncGenerator<string> {
+  const s = llmSettings;
+  const chatUrl = `${s.ollamaBaseUrl.replace(/\/$/, '')}/api/chat`;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (s.ollamaApiKey) headers['Authorization'] = `Bearer ${s.ollamaApiKey}`;
+
   const ollamaMsgs = [
     { role: 'system', content: STUDY_SYSTEM_PROMPT },
     ...messages.map(m => {
@@ -123,15 +129,15 @@ async function* streamWithOllama(messages: StudyMessage[]): AsyncGenerator<strin
     }),
   ];
 
-  const res = await fetch(config.llm.ollamaUrl, {
+  const res = await fetch(chatUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({
-      model: config.llm.model,
+      model: s.model,
       messages: ollamaMsgs,
       stream: true,
       think: false,
-      options: { num_predict: 1024, temperature: 0.7, keep_alive: -1 },
+      options: { num_predict: 4096, temperature: 0.7, keep_alive: -1 },
     }),
   });
 
@@ -158,14 +164,81 @@ async function* streamWithOllama(messages: StudyMessage[]): AsyncGenerator<strin
   }
 }
 
+async function* streamWithLMStudio(messages: StudyMessage[]): AsyncGenerator<string> {
+  const s = llmSettings;
+  const chatUrl = `${s.lmstudioBaseUrl.replace(/\/$/, '')}/v1/chat/completions`;
+
+  const lmMsgs = messages.map(m => {
+    if (m.role === 'user' && m.imageBase64) {
+      return {
+        role: 'user' as const,
+        content: [
+          {
+            type: 'image_url' as const,
+            image_url: { url: `data:${m.imageMime ?? 'image/jpeg'};base64,${m.imageBase64}` },
+          },
+          { type: 'text' as const, text: m.content || 'ما الذي تظهره هذه الصورة؟ اشرح المحتوى بالتفصيل.' },
+        ],
+      };
+    }
+    return { role: m.role as 'user' | 'assistant', content: m.content };
+  });
+
+  const res = await fetch(chatUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${s.lmstudioApiKey || 'lm-studio'}`,
+    },
+    body: JSON.stringify({
+      model: s.model,
+      messages: [{ role: 'system', content: STUDY_SYSTEM_PROMPT }, ...lmMsgs],
+      stream: true,
+      max_tokens: 4096,
+      temperature: 0.7,
+    }),
+  });
+
+  if (!res.ok || !res.body) throw new Error(`LM Studio HTTP ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === 'data: [DONE]') continue;
+        try {
+          const chunk = JSON.parse(trimmed.replace(/^data: /, '')) as {
+            choices?: [{ delta?: { content?: string } }];
+          };
+          const text = chunk.choices?.[0]?.delta?.content;
+          if (text) yield text;
+        } catch { /* skip malformed */ }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 async function* streamWithFallback(messages: StudyMessage[]): AsyncGenerator<string> {
-  // Ollama supports vision natively via the images field
-  if (config.llm.provider === 'ollama') {
+  if (llmSettings.provider === 'ollama') {
     yield* streamWithOllama(messages);
     return;
   }
-
-  // Other text-only LLMs: strip the image and note it
+  if (llmSettings.provider === 'lmstudio') {
+    yield* streamWithLMStudio(messages);
+    return;
+  }
+  // Generic text-only fallback for any other provider
   const { createMainLLM } = await import('./providers/llm/index.js');
   const llm = createMainLLM();
   const llmMsgs = [
@@ -184,7 +257,7 @@ async function* streamWithFallback(messages: StudyMessage[]): AsyncGenerator<str
 
 export async function generateTitle(messages: StudyMessage[]): Promise<string> {
   const sample = messages
-    .filter(m => m.role !== 'system' && m.content.trim())
+    .filter(m => m.content.trim())
     .slice(0, 4)
     .map(m => `${m.role}: ${m.content.replace(/[#*`]/g, '').slice(0, 200)}`)
     .join('\n');
@@ -218,19 +291,10 @@ export async function generateTitle(messages: StudyMessage[]): Promise<string> {
     return res.choices[0]?.message?.content?.trim() ?? 'Study session';
   }
 
-  const res = await fetch(config.llm.ollamaUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: config.llm.model,
-      messages: [{ role: 'user', content: prompt }],
-      stream: false,
-      think: false,
-      options: { num_predict: 30, temperature: 0.5, keep_alive: -1 },
-    }),
-  });
-  const data = await res.json() as { message: { content: string } };
-  return data.message.content.trim();
+  // Local LLM fallback (Ollama or LM Studio)
+  const { createMainLLM } = await import('./providers/llm/index.js');
+  const llm = createMainLLM();
+  return (await llm.complete([{ role: 'user', content: prompt }])).trim() || 'Study session';
 }
 
 // ── Quick translation (non-streaming) ────────────────────────────────────────
@@ -267,20 +331,10 @@ export async function quickTranslate(text: string, targetLang: string): Promise<
     return res.choices[0]?.message?.content?.trim() ?? '';
   }
 
-  // Ollama fallback
-  const res = await fetch(config.llm.ollamaUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: config.llm.model,
-      messages: [{ role: 'user', content: prompt }],
-      stream: false,
-      think: false,
-      options: { num_predict: 200, temperature: 0.3, keep_alive: -1 },
-    }),
-  });
-  const data = await res.json() as { message: { content: string } };
-  return data.message.content.trim();
+  // Local LLM fallback (Ollama or LM Studio)
+  const { createMainLLM } = await import('./providers/llm/index.js');
+  const llm = createMainLLM();
+  return (await llm.complete([{ role: 'user', content: prompt }])).trim();
 }
 
 // ── Streaming study chat ──────────────────────────────────────────────────────

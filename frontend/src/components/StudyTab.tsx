@@ -13,6 +13,7 @@ import {
   AutoAwesome as AIIcon,
   AudioFile as AudioFileIcon,
   GraphicEq as WaveIcon,
+  Refresh as RefreshIcon,
 } from '@mui/icons-material';
 import { useAudioRecorder } from '../hooks/useAudioRecorder.ts';
 import { useStudyThreads, WELCOME_MSG } from '../hooks/useStudyThreads.ts';
@@ -89,7 +90,7 @@ function speakSelection(text: string) {
 }
 
 // ── AI message card ───────────────────────────────────────────────────────────
-const AssistantMessage: React.FC<{ msg: StudyChatMsg }> = ({ msg }) => {
+const AssistantMessage: React.FC<{ msg: StudyChatMsg; isLast?: boolean; onRegenerate?: () => void }> = ({ msg, isLast, onRegenerate }) => {
   const rtl = isRtlDominant(msg.content);
   const display = msg.streaming ? msg.content + ' ▌' : msg.content;
   return (
@@ -112,12 +113,19 @@ const AssistantMessage: React.FC<{ msg: StudyChatMsg }> = ({ msg }) => {
         )}
       </Box>
       {!msg.streaming && msg.content && (
-        <Box sx={{ px: 0.5 }}>
+        <Box sx={{ px: 0.5, display: 'flex', alignItems: 'center', gap: 0.25 }}>
           <Tooltip title="Read aloud">
             <IconButton size="small" onClick={() => speakText(msg.content)} sx={{ opacity: 0.45, '&:hover': { opacity: 1 }, p: 0.5 }}>
               <VolumeUpIcon sx={{ fontSize: 16 }} />
             </IconButton>
           </Tooltip>
+          {isLast && onRegenerate && (
+            <Tooltip title="Regenerate answer">
+              <IconButton size="small" onClick={onRegenerate} sx={{ opacity: 0.45, '&:hover': { opacity: 1 }, p: 0.5 }}>
+                <RefreshIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Tooltip>
+          )}
         </Box>
       )}
     </Box>
@@ -343,6 +351,86 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inputText, attachedImage, attachedAudio, isGenerating]);
 
+  const handleRegenerate = useCallback(async () => {
+    if (isGenerating) return;
+
+    const allMsgs = messagesRef.current.filter(m => !m.streaming);
+
+    // Find last non-welcome assistant message
+    let lastAiIdx = -1;
+    for (let i = allMsgs.length - 1; i >= 0; i--) {
+      if (allMsgs[i].role === 'assistant' && allMsgs[i] !== WELCOME_MSG) { lastAiIdx = i; break; }
+    }
+    if (lastAiIdx < 0) return;
+
+    // Find user message before it
+    let lastUserIdx = -1;
+    for (let i = lastAiIdx - 1; i >= 0; i--) {
+      if (allMsgs[i].role === 'user') { lastUserIdx = i; break; }
+    }
+    if (lastUserIdx < 0) return;
+
+    const lastUserMsg = allMsgs[lastUserIdx];
+    const newMessages = allMsgs.slice(0, lastAiIdx); // includes lastUserMsg
+
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+
+    setMessages([...newMessages, { role: 'assistant', content: '', streaming: true }]);
+    setIsGenerating(true);
+
+    try {
+      const resp = await fetch(`${API_BASE}/api/study/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          history: newMessages.map(m => ({ role: m.role, content: m.content })),
+          userText: lastUserMsg.content,
+          imageBase64: lastUserMsg.imageBase64,
+          imageMime: lastUserMsg.imageMime,
+        }),
+        signal: abortRef.current.signal,
+      });
+      if (!resp.ok || !resp.body) throw new Error(`Server error: ${resp.status}`);
+
+      const reader = resp.body.getReader(), decoder = new TextDecoder();
+      let buf = '';
+      outer: while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n'); buf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') break outer;
+          let event: { type: string; text?: string };
+          try { event = JSON.parse(raw); } catch { continue; }
+          if (event.type === 'token') {
+            setMessages(prev => {
+              const last = prev[prev.length - 1];
+              return last?.role === 'assistant' && last.streaming
+                ? [...prev.slice(0, -1), { ...last, content: last.content + event.text! }]
+                : prev;
+            });
+          } else if (event.type === 'error') throw new Error(event.text);
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        setMessages(prev => {
+          const errMsg: StudyChatMsg = { role: 'assistant', content: `⚠ ${(err as Error).message}` };
+          const last = prev[prev.length - 1];
+          return last?.role === 'assistant' && last.streaming ? [...prev.slice(0, -1), errMsg] : [...prev, errMsg];
+        });
+      }
+    } finally {
+      setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m));
+      setIsGenerating(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isGenerating]);
+
   const handleAudioReady = useCallback((blob: Blob) => {
     const reader = new FileReader();
     reader.onloadend = () => void sendMessage({ audioBase64: (reader.result as string).split(',')[1] });
@@ -369,8 +457,11 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
 
         {/* Messages */}
         <Box ref={chatAreaRef} sx={{ flexGrow: 1, minHeight: 0, overflowY: 'auto', px: { xs: 1.5, sm: 2.5 }, py: 2, display: 'flex', flexDirection: 'column', gap: 2.5 }}>
-          {messages.map((m, i) => {
-            if (m.role === 'assistant') return <AssistantMessage key={`${currentId}-${i}`} msg={m} />;
+          {(() => {
+            let lastAiIdx = -1;
+            messages.forEach((m, i) => { if (m.role === 'assistant' && m !== WELCOME_MSG) lastAiIdx = i; });
+            return messages.map((m, i) => {
+            if (m.role === 'assistant') return <AssistantMessage key={`${currentId}-${i}`} msg={m} isLast={i === lastAiIdx && !isGenerating} onRegenerate={handleRegenerate} />;
             const rtl = isRtlDominant(m.content);
             return (
               <Box key={`${currentId}-${i}`} sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 0.5 }}>
@@ -397,7 +488,8 @@ export const StudyTab: React.FC<StudyTabProps> = ({ translationLang }) => {
                 </Paper>
               </Box>
             );
-          })}
+          });
+          })()}
           <div ref={bottomRef} />
         </Box>
 

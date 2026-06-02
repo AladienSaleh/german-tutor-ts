@@ -1,0 +1,9 @@
+{
+  "provider": "ollama",
+  "model": "granite4.1:8b",
+  "correctorModel": "granite4.1:3b",
+  "ollamaBaseUrl": "http://localhost:11434",
+  "ollamaApiKey": "",
+  "lmstudioBaseUrl": "http://localhost:1234",
+  "lmstudioApiKey": ""
+}

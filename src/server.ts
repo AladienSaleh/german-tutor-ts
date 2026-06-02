@@ -4,6 +4,7 @@ import fastifyStatic from '@fastify/static';
 import fastifyCors from '@fastify/cors';
 import { existsSync } from 'fs';
 import { config } from './config.js';
+import { llmSettings, saveLlmSettings, type LlmSettings } from './llm-settings.js';
 import { listScenarios, loadScenario } from './scenarios.js';
 import { handleSession } from './session.js';
 import { streamStudyChat, quickTranslate, generateTitle, type StudyMessage } from './study.js';
@@ -17,14 +18,12 @@ await app.register(fastifyCors, { origin: true });
 await app.register(fastifyWs);
 
 // ── Boot providers ────────────────────────────────────────────────────────────
-console.log(`[Boot] STT=${config.stt.provider}  LLM=${config.llm.provider}  TTS=${config.tts.provider}`);
+console.log(`[Boot] STT=${config.stt.provider}  LLM=${llmSettings.provider}/${llmSettings.model}  TTS=${config.tts.provider}`);
 
-const [stt, llm, corrector, tts] = await Promise.all([
-  createSTTProvider(),
-  Promise.resolve(createMainLLM()),
-  Promise.resolve(createCorrectorLLM()),
-  Promise.resolve(createTTSProvider()),
-]);
+const stt = await createSTTProvider();
+const tts = createTTSProvider();
+let llm = createMainLLM();
+let corrector = createCorrectorLLM();
 
 console.log('[Boot] Providers ready');
 
@@ -42,12 +41,54 @@ process.on('SIGTERM', shutdown);
 app.get('/api/scenarios', async () => ({ scenarios: listScenarios() }));
 
 app.get('/api/config', async () => ({
-  llm: { provider: config.llm.provider, model: config.llm.model },
+  llm: { provider: llmSettings.provider, model: llmSettings.model },
   stt: { provider: config.stt.provider, model: config.stt.model },
   tts: { provider: config.tts.provider },
 }));
 
 app.get('/api/health', async () => ({ status: 'ok', uptime: process.uptime() }));
+
+// ── LLM Model Listing ─────────────────────────────────────────────────────────
+app.get('/api/llm/models', async (req) => {
+  const q = req.query as { provider?: string; baseUrl?: string; apiKey?: string };
+  const provider = q.provider ?? llmSettings.provider;
+
+  if (provider === 'ollama') {
+    const base = (q.baseUrl ?? llmSettings.ollamaBaseUrl).replace(/\/$/, '');
+    const headers: Record<string, string> = {};
+    const key = q.apiKey ?? llmSettings.ollamaApiKey;
+    if (key) headers['Authorization'] = `Bearer ${key}`;
+    const res = await fetch(`${base}/api/tags`, { headers });
+    if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
+    const data = await res.json() as { models: { name: string }[] };
+    return { models: (data.models ?? []).map((m: { name: string }) => m.name).sort() };
+  }
+
+  if (provider === 'lmstudio') {
+    const base = (q.baseUrl ?? llmSettings.lmstudioBaseUrl).replace(/\/$/, '');
+    const key = q.apiKey ?? llmSettings.lmstudioApiKey;
+    const res = await fetch(`${base}/v1/models`, {
+      headers: { 'Authorization': `Bearer ${key || 'lm-studio'}` },
+    });
+    if (!res.ok) throw new Error(`LM Studio HTTP ${res.status}`);
+    const data = await res.json() as { data: { id: string }[] };
+    return { models: (data.data ?? []).map((m: { id: string }) => m.id).sort() };
+  }
+
+  return { models: [] };
+});
+
+// ── LLM Settings ──────────────────────────────────────────────────────────────
+app.get('/api/llm/settings', async () => llmSettings);
+
+app.post('/api/llm/settings', async (req) => {
+  const patch = req.body as Partial<LlmSettings>;
+  const updated = saveLlmSettings(patch);
+  llm = createMainLLM();
+  corrector = createCorrectorLLM();
+  console.log(`[LLM] Settings updated: provider=${updated.provider} model=${updated.model}`);
+  return updated;
+});
 
 // ── Study Assistant ───────────────────────────────────────────────────────────
 interface StudyChatBody {

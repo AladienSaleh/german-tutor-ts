@@ -1,24 +1,23 @@
-import { config } from '../../config.js';
+import { llmSettings } from '../../llm-settings.js';
 import type { LLMProvider } from './interface.js';
 import { OllamaLLM } from './ollama.js';
+import { LMStudioLLM } from './lmstudio.js';
 
 export type { LLMProvider };
 export type { Message } from './interface.js';
 
 export function createMainLLM(): LLMProvider {
-  return createLLMProvider(config.llm.model);
+  return createLLMProvider(llmSettings.model);
 }
 
 export function createCorrectorLLM(): LLMProvider {
-  if (config.llm.provider === 'ollama') {
-    return new OllamaLLM(config.llm.correctorModel);
-  }
-  return createLLMProvider(config.llm.model);
+  return createLLMProvider(llmSettings.correctorModel);
 }
 
 function createLLMProvider(model: string): LLMProvider {
-  switch (config.llm.provider) {
-    case 'ollama': return new OllamaLLM(model);
-    default: return new OllamaLLM(model);
+  const s = llmSettings;
+  switch (s.provider) {
+    case 'lmstudio': return new LMStudioLLM(model, s.lmstudioBaseUrl, s.lmstudioApiKey);
+    default:         return new OllamaLLM(model, s.ollamaBaseUrl, s.ollamaApiKey);
   }
 }

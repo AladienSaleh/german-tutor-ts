@@ -1,5 +1,4 @@
 import type { LLMProvider, Message } from './interface.js';
-import { config } from '../../config.js';
 
 async function* streamLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const reader = body.getReader();
@@ -21,12 +20,26 @@ async function* streamLines(body: ReadableStream<Uint8Array>): AsyncGenerator<st
 }
 
 export class OllamaLLM implements LLMProvider {
-  constructor(private readonly model: string) {}
+  private readonly chatUrl: string;
+
+  constructor(
+    private readonly model: string,
+    baseUrl: string = 'http://localhost:11434',
+    private readonly apiKey: string = '',
+  ) {
+    this.chatUrl = `${baseUrl.replace(/\/$/, '')}/api/chat`;
+  }
+
+  private headers(): Record<string, string> {
+    const h: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (this.apiKey) h['Authorization'] = `Bearer ${this.apiKey}`;
+    return h;
+  }
 
   async *stream(messages: Message[]): AsyncGenerator<string> {
-    const res = await fetch(config.llm.ollamaUrl, {
+    const res = await fetch(this.chatUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.headers(),
       body: JSON.stringify({
         model: this.model,
         messages,
@@ -47,9 +60,9 @@ export class OllamaLLM implements LLMProvider {
   }
 
   async complete(messages: Message[]): Promise<string> {
-    const res = await fetch(config.llm.ollamaUrl, {
+    const res = await fetch(this.chatUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.headers(),
       body: JSON.stringify({
         model: this.model,
         messages,
